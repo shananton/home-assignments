@@ -36,30 +36,17 @@ class _CornerStorageBuilder:
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    PYRAMID_FACTOR = 2
 
     h, w = frame_sequence.frame_shape[:2]
 
     # Corner detection parameters:
-    blocks_approx_count = 1000
+    blocks_approx_count = 1500
     block_size = round((w * h / blocks_approx_count) ** 0.5)
-    max_corners = blocks_approx_count * 0.75
-    corner_min_rel_quality = 0.1
+    corner_min_rel_quality = 0.05
 
     # Flow tracking parameters:
     window_size = (21, 21)
     pyramid_max_level = 4 - 1
-
-    def detect_new_corners(img, corners_count, mask=None):
-        return cv2.goodFeaturesToTrack(
-            img,
-            maxCorners=corners_count,
-            qualityLevel=corner_min_rel_quality,
-            minDistance=block_size,
-            blockSize=block_size,
-            mask=mask,
-            gradientSize=3
-        )
 
     def mask_exclude_neighbors(positions, sizes):
         result = np.full((h, w), 255, dtype=np.uint8)
@@ -81,38 +68,49 @@ def _build_impl(frame_sequence: pims.FramesSequence,
             maxLevel=pyramid_max_level,
             withDerivatives=False
         )
-
         if corners.size != 0:
-            next_corners, status, error = None, None, None
-            for level in range(last_level, -1, -1):
-                next_corners, status, err = cv2.calcOpticalFlowPyrLK(
-                    prev_pyramid[level],
-                    pyramid[level],
-                    prevPts=corners / PYRAMID_FACTOR ** level,
-                    nextPts=None if next_corners is None else PYRAMID_FACTOR * next_corners,
-                    flags=(next_corners is not None) * cv2.OPTFLOW_USE_INITIAL_FLOW,
-                    winSize=window_size
-                )
-            keep = status.flat == 1
+            next_corners, status, err = cv2.calcOpticalFlowPyrLK(
+                prevImg=prev_pyramid[0],
+                nextImg=pyramid[0],
+                prevPts=corners,
+                winSize=window_size,
+                nextPts=None,
+                minEigThreshold=1e-6
+            )
+            err_flat = err.reshape(-1).astype(np.float64)
+            err_ok = err_flat[status.flat == 1]
+            err_q = np.quantile(err_ok, 0.9)
+            keep = np.logical_and(status.flat == 1,
+                                  err_flat < 2.0 * err_q)
             corner_ids = corner_ids[keep]
             corners = next_corners[keep]
             corner_sizes = corner_sizes[keep]
 
         mask = mask_exclude_neighbors(corners, corner_sizes)
         for level, level_img in enumerate(pyramid):
-            if corners.size < max_corners:
-                real_block_size = block_size * PYRAMID_FACTOR ** level
 
-                new_corners = detect_new_corners(level_img, int(max_corners - corners.size), mask)
-                if new_corners is not None:
-                    new_corners = new_corners.reshape((-1, 2)) * PYRAMID_FACTOR ** level
+            new_corners = cv2.goodFeaturesToTrack(
+                level_img,
+                maxCorners=0,
+                qualityLevel=corner_min_rel_quality,
+                minDistance=block_size * 0.7,
+                blockSize=block_size,
+                mask=mask,
+                gradientSize=3
+            )
+            if new_corners is not None:
+                new_corners = new_corners.reshape((-1, 2)) * 2 ** level
 
-                    count = new_corners.shape[0]
-                    corner_ids = np.concatenate((corner_ids, np.arange(next_id, next_id + count).reshape((-1, 1))))
-                    next_id += count
-                    corners = np.concatenate((corners, new_corners))
-                    corner_sizes = np.concatenate((corner_sizes, np.full(count, real_block_size).reshape((-1, 1))))
-            mask = cv2.pyrDown(mask).astype(np.uint8)
+                count = new_corners.shape[0]
+                corner_ids = np.concatenate((corner_ids, np.arange(next_id, next_id + count).reshape((-1, 1))))
+                next_id += count
+                corners = np.concatenate((corners, new_corners))
+                corner_sizes = np.concatenate((corner_sizes,
+                                               np.full(count, block_size * 1.5 ** level).reshape((-1, 1))))
+
+            mask = mask_exclude_neighbors(corners, corner_sizes)
+            for _ in range(level + 1):
+                mask = cv2.pyrDown(mask).astype(np.uint8)
             mask[mask <= 100] = 0
 
         prev_pyramid = pyramid
