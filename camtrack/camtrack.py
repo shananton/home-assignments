@@ -39,11 +39,11 @@ TRIANGULATION_MAX_REPROJECTION_ERROR = 1.5
 TRIANGULATION_MIN_ANGLE_DEG = 2.0
 TRIANGULATION_MIN_DEPTH = 0.1
 
-PNP_RANSAC_INLIERS_MAX_REPROJECTION_ERROR = 1.0
+PNP_RANSAC_INLIERS_MAX_REPROJECTION_ERROR = 2.0
 PNP_RANSAC_CONFIDENCE = 0.999
 
 INIT_RANSAC_CONFIDENCE = 0.9999
-INIT_MIN_FRAME_DISTANCE = 5
+INIT_MIN_FRAME_DISTANCE = 3
 INIT_MAX_FRAME_DISTANCE = 75
 
 INIT_MAX_LINE_DISTANCE = 1.0
@@ -129,6 +129,8 @@ class CameraTracker:
         return view, len(inlier_ids), reprojection_errors.mean()
 
     def try_solve_pnp(self, points_3d: np.ndarray, points_2d: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        if len(points_3d) < 6:
+            return None
         ok, r_vec, t_vec, inliers = cv2.solvePnPRansac(
             objectPoints=points_3d,
             imagePoints=points_2d,
@@ -136,10 +138,26 @@ class CameraTracker:
             distCoeffs=None,
             confidence=PNP_RANSAC_CONFIDENCE,
             reprojectionError=PNP_RANSAC_INLIERS_MAX_REPROJECTION_ERROR,
-            flags=cv2.SOLVEPNP_ITERATIVE
+            flags=cv2.SOLVEPNP_EPNP
         )
         if not ok:
             return None
+        inliers = inliers.flatten()
+
+        if len(inliers) < 6:
+            return None
+
+        _, r_vec, t_vec = cv2.solvePnP(
+            points_3d,
+            points_2d,
+            self.intrinsic_mat,
+            distCoeffs=None,
+            rvec=r_vec,
+            tvec=t_vec,
+            useExtrinsicGuess=True,
+            flags=cv2.SOLVEPNP_ITERATIVE
+        )
+
         return rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec), inliers
 
     def initialize_known_views(self):
@@ -183,6 +201,8 @@ class CameraTracker:
                                   reprojection_threshold: np.float64,  # 3.0
                                   homography_inlier_ration_threshold: np.float64) \
             -> Optional[Tuple[np.ndarray, int, np.float]]:
+        if len(correspondences.ids) < 6:
+            return None
         essential_mat, essential_inliers_mask = cv2.findEssentialMat(
             correspondences.points_1,
             correspondences.points_2,
@@ -232,6 +252,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
     np.random.seed(420)
+    cv2.setRNGSeed(1337)
 
     camera_tracker = CameraTracker(camera_parameters, corner_storage, frame_sequence_path, known_view_1, known_view_2)
     camera_tracker.track_camera()
